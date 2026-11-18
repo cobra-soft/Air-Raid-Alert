@@ -2303,7 +2303,7 @@ pre{max-height:280px;font-size:11px;line-height:15px}
 <div class="app">
 <nav class="rail" id="nav"></nav>
 <div class="main">
-<header class="top"><h1>Air Raid Worker<small id="sub"></small></h1><div class="sw on" id="auto" title="Автообновление 5с"><b>Авто</b><i></i></div>
+<header class="top"><h1>Admin Panel Type 2 (APT 2)<small id="sub"></small></h1><div class="sw on" id="auto" title="Автообновление 5с"><b>Авто</b><i></i></div>
 <button class="ib" id="rf" title="Обновить"><svg viewBox="0 0 24 24"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg></button><button class="ib" id="lo" title="Выйти"><svg viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg></button></header>
 <div class="prog" id="prog"><i></i></div>
 <main class="view" id="view"></main>
@@ -2319,6 +2319,7 @@ function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return
 function tm(x){return x?new Date(x).toLocaleTimeString("ru-RU",{timeZone:TZ,hour:"2-digit",minute:"2-digit"}):"—"}
 function dtm(x){return x?new Date(x).toLocaleString("ru-RU",{timeZone:TZ}):"—"}
 function age(s){if(s==null)return"—";if(s<90)return s+" с";if(s<5400)return Math.round(s/60)+" мин";return(s/3600).toFixed(1)+" ч"}
+function ageNow(at){if(!at)return"—";return age(Math.max(0,Math.round((Date.now()-Number(at))/1000)))}
 function dur(x){if(!x)return"—";var m=Math.max(0,Math.round((Date.now()-new Date(x))/60000));if(m<60)return m+" мин";var t=Math.floor(m/60);if(t<48)return t+" ч "+(m%60)+" мин";var d=Math.floor(t/24);return d+" дн "+(t%24)+" ч"}
 function plural(n,a,b,c){n=Math.abs(n)%100;var d=n%10;if(n>10&&n<20)return c;if(d===1)return a;if(d>=2&&d<=4)return b;return c}
 function kv(k,v,c){return'<div class="kv"><span>'+esc(k)+'</span><span class="'+(c||"")+'">'+(v==null||v===""?"—":esc(v))+'</span></div>'}
@@ -2339,18 +2340,18 @@ function health(){var d=S.d,f=S.f,is=[],lvl="ok";
  if(f.users&&f.users.ok&&f.users.stats.pending)wr(f.users.stats.pending+" "+plural(f.users.stats.pending,"пользователь ждёт","пользователя ждут","пользователей ждут")+" доставки");
  if(f.kvWrite&&!f.kvWrite.ok)bad("Запись в D1 не работает: "+f.kvWrite.error);
  return{lvl:lvl,is:is}}
-function vOv(){var d=S.d,f=S.f,s=d.snapshot,h=health(),n=s?s.oblasts.length+s.raions.length:0;
+function vOv(){var d=S.d,f=S.f,s=d.snapshot,h=health(),n=s?s.oblasts.length+s.raions.length:0,sa=s&&s.fetchedAt?Math.max(0,Math.round((Date.now()-s.fetchedAt)/1000)):null;
  var T={ok:["✓","Всё работает","Критических проблем не обнаружено"],warn:["!","Есть замечания",""],bad:["✕","Есть проблемы",""]}[h.lvl];
  var o="";
  if(d.maintenance&&d.maintenance.active){o+='<div class="hero card warn"><div class="ic">🛠</div><div><b>Технические работы</b><span>'+esc(d.maintenance.message||"Рассылка уведомлений приостановлена")+' · с '+dtm(d.maintenance.since)+'</span></div></div>'}
  o+='<div class="hero card '+h.lvl+'"><div class="ic">'+T[0]+'</div><div><b>'+T[1]+'</b><span>'+esc(h.is.length?h.is.join(" · "):T[2])+'</span></div></div>';
  o+='<div class="metrics"><div class="m'+(n?' hl':'')+'"><div class="v">'+n+'</div><div class="l">Активных тревог</div></div>'
-  +'<div class="m"><div class="v '+(s?(s.ageSeconds>2100?"bad":""):"bad")+'" id="snapAge" data-at="'+(s&&s.fetchedAt?s.fetchedAt:0)+'" data-sev="1">'+(s?age(s.ageSeconds):"—")+'</div><div class="l">Возраст снапшота</div></div>'
+  +'<div class="m"><div class="v '+(s?(sa>2100?"bad":"ok"):"bad")+'" id="snapAge" data-at="'+(s&&s.fetchedAt?s.fetchedAt:0)+'" data-sev="1">'+(s?ageNow(s.fetchedAt):"—")+'</div><div class="l">Возраст снапшота</div></div>'
   +'<div class="m"><div class="v">'+(f.users&&f.users.ok?f.users.stats.total:"—")+'</div><div class="l">Пользователей</div></div>'
   +'<div class="m"><div class="v">'+(f.users&&f.users.ok?f.users.stats.pending:"—")+'</div><div class="l">Ждут доставки</div></div></div>';
  var u=f.upstream,w=f.webhook,c=d.cron,L="";
  L+=li("⚙",d.bindings.alertsKey&&d.bindings.botToken&&d.bindings.db?"ok":"bad","Переменные и биндинги","API key "+(d.bindings.alertsKey?"✓":"✕")+" · Bot "+(d.bindings.botToken?"✓":"✕")+" · D1 "+(d.bindings.db?"✓":"✕"),"","sy");
- L+=li("◷",!s?"bad":s.ageSeconds>2100?"bad":s.ageSeconds>d.config.cacheWriteIntervalSec?"warn":"ok","Снапшот D1",s?"Обновлено "+dtm(s.fetchedAt)+" · edge-кэш /api: "+(d.edgeCache?"есть":"пуст"):"cron ещё не отработал",s?age(s.ageSeconds):"","sy");
+ L+=li("◷",!s?"bad":sa>2100?"bad":sa>d.config.cacheWriteIntervalSec?"warn":"ok","Снапшот D1",s?"Обновлено "+dtm(s.fetchedAt)+" · edge-кэш /api: "+(d.edgeCache?"есть":"пуст"):"cron ещё не отработал",s?'<span data-at="'+s.fetchedAt+'" data-snapd1="1" data-cache="'+d.config.cacheWriteIntervalSec+'">'+ageNow(s.fetchedAt)+'</span>':"","sy");
  L+=li("☁",u?(u.ok?"ok":(u.rateLimited?"warn":"bad")):(!s?"bad":(c&&c.state==="fail"?"warn":"ok")),"alerts.in.ua",u?(u.ok?u.oblasts+" областей, "+u.raions+" районов"+(u.sameAsSnapshot===false?" · отличается от снапшота":""):(u.rateLimited?"Живая проверка: лимит запросов (429). На бота это не влияет — он берёт данные через cron":u.error)):(c&&c.state==="fail"?"Cron получает ошибки — см. строку ниже":"Данные приходят через cron без сбоев. Живая проверка — вкладка «Система»"),u?u.ms+" мс":"","sy");
   var c=d.cron;L+=li("⏱",!c?"":(c.state==="fail"?"warn":"ok"),"Опрос alerts.in.ua (cron)",!c?"Сбоев не зафиксировано":(c.state==="fail"?"Сбой с "+dtm(c.since)+": "+c.error:"Восстановлен "+dtm(c.at)+" (сбой был с "+dtm(c.recoveredFrom)+")"),"","sy");
  L+=li("✈",w?(w.ok&&w.info.url&&!whErr(w)?"ok":"warn"):"","Telegram webhook",w?(w.ok?(whErr(w)||("pending: "+w.info.pending_update_count+(w.info.last_error_message?" · старая ошибка "+dtm(w.info.last_error_date*1000):""))):w.error):"Не проверено",w&&w.ok?w.ms+" мс":"","sy");
@@ -2417,7 +2418,7 @@ function vSy(){var d=S.d,f=S.f,s=d.snapshot,o="",m=d.maintenance||{active:false}
    +'<button class="btn t" onclick="ask(\\'maintenance-resend\\',\\'Повторить рассылку?\\',\\'Отправит уведомление о текущем режиме тех. работ всем пользователям ещё раз.\\')">Повторить рассылку</button></div>');
  o+=card("Действия",'<div class="sh">Проверки</div><div class="btns"><button class="btn" onclick="load(true)">Полная проверка</button><button class="btn" onclick="load(true,false,false,true)">Проверить alerts.in.ua</button><button class="btn" onclick="load(true,true)">Тест записи D1</button></div><div class="sh">Обслуживание</div><div class="btns"><button class="btn o" onclick="ask(\\'init-schema\\',\\'Создать недостающие таблицы D1?\\',\\'Выполнит CREATE TABLE IF NOT EXISTS для users, cache_kv, notified_events, device_links. Существующие таблицы и данные не изменяются.\\')">Инициализировать D1</button><button class="btn o" onclick="ask(\\'setup-webhook\\',\\'Установить webhook?\\',\\'Выполнится setWebhook с drop_pending_updates=true — очередь ожидающих апдейтов будет очищена.\\')">Setup webhook</button><button class="btn o" onclick="ask(\\'purge-edge\\',\\'Сбросить кэш /api?\\',\\'Следующий запрос плагина пойдёт в D1/upstream.\\')">Сбросить кэш /api</button></div><div class="sh">Рассылка и данные</div><div class="btns"><button class="btn o" onclick="ask(\\'resync-notify\\',\\'Досинхронизировать рассылку?\\',\\'Разошлёт сообщения всем, у кого сохранённое состояние разошлось с текущим снапшотом, не дожидаясь нового изменения тревог.\\')">Досинхронизировать рассылку</button><a class="btn" style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none" href="/admin/export/users.sql?overwrite=1">Скачать users.sql</a></div>');
  o+=card("Воркер",kv("Версия",d.version)+kv("Языки",d.langs.join(", "))+kv("Время",dtm(d.time))+kv("Edge TTL /api",d.config.edgeTtl+" с")+kv("Мин. интервал записи D1",d.config.cacheWriteIntervalSec+" с")+kv("Окно ретраев",d.config.retryWindowSec+" с"));
- if(s)o+=card("Снапшот",'<div class="kv"><span>Возраст</span><span class="'+(s.ageSeconds>2100?"bad":"ok")+'" id="snapAgeSv" data-at="'+(s.fetchedAt||0)+'" data-sev="1">'+age(s.ageSeconds)+'</span></div>'+kv("Обновлено",dtm(s.fetchedAt))+kv("Областей / районов",s.oblasts.length+" / "+s.raions.length)+kv("pendingRetry",s.pendingRetry?dtm(s.pendingRetry):"нет",s.pendingRetry?"warn":"ok")+kv("Подпись",(s.signature||"").slice(0,60)+((s.signature||"").length>60?"…":"")));
+ if(s){var sas=Math.max(0,Math.round((Date.now()-s.fetchedAt)/1000));o+=card("Снапшот",'<div class="kv"><span>Возраст</span><span class="'+(sas>2100?"bad":"ok")+'" id="snapAgeSv" data-at="'+(s.fetchedAt||0)+'" data-sev="1">'+ageNow(s.fetchedAt)+'</span></div>'+kv("Обновлено",dtm(s.fetchedAt))+kv("Областей / районов",s.oblasts.length+" / "+s.raions.length)+kv("pendingRetry",s.pendingRetry?dtm(s.pendingRetry):"нет",s.pendingRetry?"warn":"ok")+kv("Подпись",(s.signature||"").slice(0,60)+((s.signature||"").length>60?"…":"")));}
  var u=f.upstream;if(u)o+=card("alerts.in.ua (live)",kv("Статус",u.ok?"OK":(u.rateLimited?"Лимит (429)":"Ошибка"),u.ok?"ok":(u.rateLimited?"warn":"bad"))+kv("Ответ",u.ms+" мс")+(u.ok?kv("Сырых alerts",u.rawAlerts)+kv("Области / районы",u.oblasts+" / "+u.raions)+kv("Совпадает со снапшотом",u.sameAsSnapshot==null?"—":u.sameAsSnapshot?"да":"нет",u.sameAsSnapshot===false?"warn":"ok"):kv("Ошибка",u.error,"bad")));
  var w=f.webhook;if(w){var i=w.info||{};o+=card("Telegram webhook",w.ok?kv("URL",i.url||"не задан",i.url?"":"bad")+kv("В очереди",i.pending_update_count,i.pending_update_count>0?"warn":"ok")+kv("Последняя ошибка",i.last_error_message||"нет",i.last_error_message?"bad":"ok")+kv("Когда",i.last_error_date?dtm(i.last_error_date*1000):"—")+kv("Макс. соединений",i.max_connections)+kv("Ответ",w.ms+" мс"):kv("Ошибка",w.error,"bad"))}
  if(f.kvWrite)o+=card("Тест записи D1",kv("Результат",f.kvWrite.ok?"OK · "+f.kvWrite.ms+" мс":f.kvWrite.error,f.kvWrite.ok?"ok":"bad"));
@@ -2426,7 +2427,7 @@ function vSy(){var d=S.d,f=S.f,s=d.snapshot,o="",m=d.maintenance||{active:false}
 function draw(){if(!S.d){$("view").innerHTML='<div class="empty card">Загрузка…</div>';return}
  var v={ov:vOv,al:vAl,us:vUs,sy:vSy}[S.tab]();var q=$("q"),foc=q&&document.activeElement===q,pos=foc?q.selectionStart:0;
  $("view").innerHTML=v;if(foc){q=$("q");q.focus();q.setSelectionRange(pos,pos)}
- $("sub").textContent=new Date().toLocaleTimeString("ru-RU",{timeZone:TZ})+" · "+S.d.version}
+ $("sub").textContent=new Date().toLocaleTimeString("ru-RU",{timeZone:TZ})+" · Admin Panel Type 2 (APT 2)"}
 function snack(m){var e=$("snack");e.textContent=m;e.classList.add("on");clearTimeout(snack.t);snack.t=setTimeout(function(){e.classList.remove("on")},2500)}
 function busy(n){S.busy+=n;$("prog").classList.toggle("on",S.busy>0)}
 function load(full,kv,quiet,up){busy(1);
@@ -2442,7 +2443,7 @@ $("rf").onclick=function(){load(false)};$("lo").onclick=function(){fetch("/admin
 $("auto").onclick=function(){S.auto=!S.auto;this.classList.toggle("on",S.auto)};
 nav();draw();load(true,false,true);setInterval(function(){if(S.auto&&!document.hidden)load(false)},5000);
 setInterval(function(){if(S.auto&&!document.hidden)loadUsers()},10000);
-setInterval(function(){var els=document.querySelectorAll("[data-at]");for(var i=0;i<els.length;i++){var at=Number(els[i].getAttribute("data-at"));if(!at)continue;var a=Math.max(0,Math.round((Date.now()-at)/1000));els[i].textContent=age(a);if(els[i].getAttribute("data-sev"))els[i].classList.toggle("bad",a>2100)}},1000);
+setInterval(function(){var els=document.querySelectorAll("[data-at]");for(var i=0;i<els.length;i++){var at=Number(els[i].getAttribute("data-at"));if(!at)continue;var a=Math.max(0,Math.round((Date.now()-at)/1000));els[i].textContent=age(a);if(els[i].getAttribute("data-sev")){els[i].classList.toggle("bad",a>2100);els[i].classList.toggle("ok",a<=2100)}if(els[i].getAttribute("data-snapd1")){var cache=Number(els[i].getAttribute("data-cache"))||60,li=els[i].closest(".li"),av=li&&li.querySelector(".av");if(av){av.classList.toggle("bad",a>2100);av.classList.toggle("warn",a<=2100&&a>cache);av.classList.toggle("ok",a<=cache)}}}},1000);
 </script></body></html>`;
 
 export default {
