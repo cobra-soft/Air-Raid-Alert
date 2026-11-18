@@ -4,7 +4,7 @@ const ALERTS_API = "https://api.alerts.in.ua/v1/alerts/active.json";
 const TELEGRAM_API = "https://api.telegram.org/bot";
 const FETCH_TIMEOUT_MS = 5000;
 const EDGE_CACHE_TTL_SECONDS = 5;
-const WORKER_VERSION = "air-raid-panel-2026-11-18.25";
+const WORKER_VERSION = "air-raid-panel-2026-11-18.26";
 const SEND_CONCURRENCY = 15;
 const MIN_CACHE_WRITE_INTERVAL_SECONDS = 60;
 const RETRY_WINDOW_MS = 5 * 60 * 1000;
@@ -1303,7 +1303,7 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>Тривоги більше немає</b>\n${region}${start ? ` • почалась ${start}` : ""}\nТочний час відбою невідомий через перерву в роботі сервісу (зафіксовано о ${detectedAt})`,
     enabled: "✅ Сповіщення через Telegram увімкнено",
     unsubscribed: "❌ Сповіщення через Telegram вимкнено",
-    unregistered: "🗑 Дані видалено. Сповіщення та акаунт вимкнено. Щоб підключитися знову, натисніть «Підключити Telegram» у плагіні.",
+    unregistered: "🗑 Дані видалено. Щоб підключитися знову, натисніть «Підключити Telegram» у плагіні.",
     unregisterNoData: "ℹ️ Немає активної підписки — видаляти нічого.",
     unregisterFailed: "⚠️ Не вдалося видалити дані. Спробуйте ще раз пізніше.",
     test: "⚪ Це тестове повідомлення від Air Raid Alert.",
@@ -1328,7 +1328,7 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>Тревоги больше нет</b>\n${region}${start ? ` • началась ${start}` : ""}\nТочное время отбоя неизвестно из-за перерыва в работе сервиса (зафиксировано в ${detectedAt})`,
     enabled: "✅ Уведомления через Telegram включены",
     unsubscribed: "❌ Уведомления через Telegram отключены",
-    unregistered: "🗑 Данные удалены. Уведомления и аккаунт отключены. Чтобы подключиться снова, нажмите «Подключить Telegram» в плагине.",
+    unregistered: "🗑 Данные удалены. Чтобы подключиться снова, нажмите «Подключить Telegram» в плагине.",
     unregisterNoData: "ℹ️ Нет активной подписки — удалять нечего.",
     unregisterFailed: "⚠️ Не удалось удалить данные. Попробуйте ещё раз позже.",
     test: "⚪ Это тестовое сообщение от Air Raid Alert.",
@@ -1353,7 +1353,7 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>All clear</b>\n${region}${start ? ` • started ${start}` : ""}\nExact end time unknown due to a service interruption (detected at ${detectedAt})`,
     enabled: "✅ Telegram notifications enabled",
     unsubscribed: "❌ Telegram notifications disabled",
-    unregistered: "🗑 Your data has been deleted. Notifications and account are disabled. To reconnect, tap “Connect Telegram” in the plugin.",
+    unregistered: "🗑 Your data has been deleted. To reconnect, tap “Connect Telegram” in the plugin.",
     unregisterNoData: "ℹ️ No active subscription — nothing to delete.",
     unregisterFailed: "⚠️ Could not delete your data. Please try again later.",
     test: "⚪ This is a test message from Air Raid Alert.",
