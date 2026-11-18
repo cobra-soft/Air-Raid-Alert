@@ -615,12 +615,25 @@ async function recordCron(env, ok, err) {
     const prev = prevRaw ? JSON.parse(prevRaw) : null;
     const now = Date.now();
     if (ok) {
-      if (prev && prev.state === "fail") {
-        await d1PutKV(env.DB, CRON_STATUS_KEY, JSON.stringify({ state: "ok", at: now, recoveredFrom: prev.since, error: prev.error }));
+      if (prev && (prev.state === "fail" || prev.state === "rate_limited")) {
+        await d1PutKV(env.DB, CRON_STATUS_KEY, JSON.stringify({ state: "ok", at: now, recoveredFrom: prev.since || prev.at || null, error: prev.error || null }));
       }
       return;
     }
     const msg = String(err && err.message || err).slice(0, 160);
+    const rateLimited = !!(err && (err.status === 429 || /\b429\b/.test(msg)));
+    if (rateLimited) {
+      if (!prev || prev.state === "ok" || !prev.state || prev.state === "rate_limited") {
+        if (!prev || prev.state !== "rate_limited") {
+          await d1PutKV(env.DB, CRON_STATUS_KEY, JSON.stringify({ state: "rate_limited", since: now, lastAt: now, error: msg }));
+        } else if (now - (prev.lastAt || 0) > 600000) {
+          await d1PutKV(env.DB, CRON_STATUS_KEY, JSON.stringify({ ...prev, lastAt: now, error: msg }));
+        }
+      } else if (now - (prev.lastAt || 0) > 600000) {
+        await d1PutKV(env.DB, CRON_STATUS_KEY, JSON.stringify({ ...prev, lastAt: now, error: msg }));
+      }
+      return;
+    }
     if (!prev || prev.state !== "fail") {
       await d1PutKV(env.DB, CRON_STATUS_KEY, JSON.stringify({ state: "fail", since: now, lastAt: now, error: msg }));
     } else if (now - (prev.lastAt || 0) > 600000) {
@@ -2336,7 +2349,9 @@ function health(){var d=S.d,f=S.f,is=[],lvl="ok";
   if(!d.snapshot)bad("Нет снапшота");else if(sa>2100)bad("Снапшот устарел ("+age(sa)+")");
  if(d.snapshot&&d.snapshot.pendingRetry)wr("Есть неудачные доставки (retry)");
  if(f.upstream&&!f.upstream.ok&&!f.upstream.rateLimited)bad("alerts.in.ua: "+f.upstream.error);
-  if(d.cron&&d.cron.state==="fail"&&Date.now()-d.cron.lastAt<900000)wr("Cron: сбой опроса alerts.in.ua с "+dtm(d.cron.since)+" ("+d.cron.error+")");
+  var cronRate=d.cron&&(d.cron.state==="rate_limited"||(d.cron.state==="fail"&&/\b429\b/.test(d.cron.error||"")));
+  if(d.cron&&d.cron.state==="fail"&&!cronRate&&Date.now()-(d.cron.lastAt||0)<900000)wr("Cron: сбой опроса alerts.in.ua с "+dtm(d.cron.since)+" ("+d.cron.error+")");
+  else if(d.cron&&cronRate&&Date.now()-(d.cron.lastAt||d.cron.at||0)<900000)wr("alerts.in.ua: лимит запросов (429), повтор позже (с "+dtm(d.cron.since||d.cron.at)+")");
  if(f.webhook){if(!f.webhook.ok)wr("Webhook: "+f.webhook.error);else if(!f.webhook.info.url)bad("Webhook не установлен");else if(whErr(f.webhook))wr("Webhook: "+whErr(f.webhook))}
  if(f.users&&f.users.ok&&f.users.stats.pending)wr(f.users.stats.pending+" "+plural(f.users.stats.pending,"пользователь ждёт","пользователя ждут","пользователей ждут")+" доставки");
  if(f.kvWrite&&!f.kvWrite.ok)bad("Запись в D1 не работает: "+f.kvWrite.error);
@@ -2353,8 +2368,10 @@ function vOv(){var d=S.d,f=S.f,s=d.snapshot,h=health(),n=s?s.oblasts.length+s.ra
  var u=f.upstream,w=f.webhook,c=d.cron,L="";
  L+=li("⚙",d.bindings.alertsKey&&d.bindings.botToken&&d.bindings.db?"ok":"bad","Переменные и биндинги","API key "+(d.bindings.alertsKey?"✓":"✕")+" · Bot "+(d.bindings.botToken?"✓":"✕")+" · D1 "+(d.bindings.db?"✓":"✕"),"","sy");
  L+=li("◷",!s?"bad":sa>2100?"bad":sa>d.config.cacheWriteIntervalSec?"warn":"ok","Снапшот D1",s?"Обновлено "+dtm(s.fetchedAt)+" · edge-кэш /api: "+(d.edgeCache?"есть":"пуст"):"cron ещё не отработал",s?'<span data-at="'+s.fetchedAt+'" data-snapd1="1" data-cache="'+d.config.cacheWriteIntervalSec+'">'+ageNow(s.fetchedAt)+'</span>':"","sy");
- L+=li("☁",u?(u.ok?"ok":(u.rateLimited?"warn":"bad")):(!s?"bad":(c&&c.state==="fail"?"warn":"ok")),"alerts.in.ua",u?(u.ok?u.oblasts+" областей, "+u.raions+" районов"+(u.sameAsSnapshot===false?" · отличается от снапшота":""):(u.rateLimited?"Живая проверка: лимит запросов (429). На бота это не влияет — он берёт данные через cron":u.error)):(c&&c.state==="fail"?"Cron получает ошибки — см. строку ниже":"Данные приходят через cron без сбоев. Живая проверка — вкладка «Система»"),u?u.ms+" мс":"","sy");
-  var c=d.cron;L+=li("⏱",!c?"":(c.state==="fail"?"warn":"ok"),"Опрос alerts.in.ua (cron)",!c?"Сбоев не зафиксировано":(c.state==="fail"?"Сбой с "+dtm(c.since)+": "+c.error:"Восстановлен "+dtm(c.at)+" (сбой был с "+dtm(c.recoveredFrom)+")"),"","sy");
+ var cronRate=c&&(c.state==="rate_limited"||(c.state==="fail"&&/\b429\b/.test(c.error||"")));
+ L+=li("☁",u?(u.ok?"ok":(u.rateLimited?"warn":"bad")):(!s?"bad":(c&&(c.state==="fail"||c.state==="rate_limited")?"warn":"ok")),"alerts.in.ua",u?(u.ok?u.oblasts+" областей, "+u.raions+" районов"+(u.sameAsSnapshot===false?" · отличается от снапшота":""):(u.rateLimited?"Живая проверка: лимит запросов (429). На бота это не влияет — он берёт данные через cron":u.error)):(cronRate?"Лимит запросов (429) — cron повторит позже":c&&c.state==="fail"?"Cron получает ошибки — см. строку ниже":"Данные приходят через cron без сбоев. Живая проверка — вкладка «Система»"),u?u.ms+" мс":"","sy");
+  var c=d.cron;cronRate=c&&(c.state==="rate_limited"||(c.state==="fail"&&/\b429\b/.test(c.error||"")));
+  L+=li("⏱",!c?"":(c.state==="fail"&&!cronRate?"warn":cronRate?"warn":"ok"),"Опрос alerts.in.ua (cron)",!c?"Сбоев не зафиксировано":(cronRate?"Лимит запросов (429) с "+dtm(c.since||c.at)+" — повтор позже":c.state==="fail"?"Сбой с "+dtm(c.since)+": "+c.error:"Восстановлен "+dtm(c.at)+" (сбой был с "+dtm(c.recoveredFrom)+")"),"","sy");
  L+=li("✈",w?(w.ok&&w.info.url&&!whErr(w)?"ok":"warn"):"","Telegram webhook",w?(w.ok?(whErr(w)||("pending: "+w.info.pending_update_count+(w.info.last_error_message?" · старая ошибка "+dtm(w.info.last_error_date*1000):""))):w.error):"Не проверено",w&&w.ok?w.ms+" мс":"","sy");
  o+=card("Сервисы",L);
  if(n){o+=card("Сейчас в тревоге",activeList(6)+(n>6?'<div class="row" style="margin-top:8px"><button class="btn t" onclick="tab(\\'al\\')">Показать все ('+n+')</button></div>':""))}
