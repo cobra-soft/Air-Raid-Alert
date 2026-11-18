@@ -2332,7 +2332,8 @@ function health(){var d=S.d,f=S.f,is=[],lvl="ok";
  function bad(m){is.push(m);lvl="bad"}function wr(m){is.push(m);if(lvl!=="bad")lvl="warn"}
   if(!d.bindings.alertsKey)bad("Нет ALERTS_API_KEY");if(!d.bindings.botToken)bad("Нет BOT_TOKEN");
   if(d.dbSchema&&!d.dbSchema.ok)bad("D1: "+(d.dbSchema.missing&&d.dbSchema.missing.length?"нет таблиц: "+d.dbSchema.missing.join(", "):"не хватает колонок в "+((d.dbSchema.badColumns||[]).map(function(x){return x.table}).join(", ")||"users")));
-  if(!d.snapshot)bad("Нет снапшота");else if(d.snapshot.ageSeconds>2100)bad("Снапшот устарел ("+age(d.snapshot.ageSeconds)+")");
+  var sa=d.snapshot&&d.snapshot.fetchedAt?Math.max(0,Math.round((Date.now()-d.snapshot.fetchedAt)/1000)):d.snapshot&&d.snapshot.ageSeconds;
+  if(!d.snapshot)bad("Нет снапшота");else if(sa>2100)bad("Снапшот устарел ("+age(sa)+")");
  if(d.snapshot&&d.snapshot.pendingRetry)wr("Есть неудачные доставки (retry)");
  if(f.upstream&&!f.upstream.ok&&!f.upstream.rateLimited)bad("alerts.in.ua: "+f.upstream.error);
   if(d.cron&&d.cron.state==="fail"&&Date.now()-d.cron.lastAt<900000)wr("Cron: сбой опроса alerts.in.ua с "+dtm(d.cron.since)+" ("+d.cron.error+")");
