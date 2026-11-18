@@ -1303,6 +1303,9 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>Тривоги більше немає</b>\n${region}${start ? ` • почалась ${start}` : ""}\nТочний час відбою невідомий через перерву в роботі сервісу (зафіксовано о ${detectedAt})`,
     enabled: "✅ Сповіщення через Telegram увімкнено",
     unsubscribed: "❌ Сповіщення через Telegram вимкнено",
+    stopped: "🗑 Дані видалено. Сповіщення та акаунт вимкнено. Щоб підключитися знову, натисніть «Підключити Telegram» у плагіні.",
+    stopNoData: "ℹ️ Немає активної підписки — видаляти нічого.",
+    stopFailed: "⚠️ Не вдалося видалити дані. Спробуйте ще раз пізніше.",
     test: "⚪ Це тестове повідомлення від Air Raid Alert.",
     statusNoRegion: "⚪ Регіон ще не обрано.\nВідкрий налаштування плагіна Air Raid Alert і обери область.",
     statusHeader: region => `📍 <b>${region}</b>`,
@@ -1325,6 +1328,9 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>Тревоги больше нет</b>\n${region}${start ? ` • началась ${start}` : ""}\nТочное время отбоя неизвестно из-за перерыва в работе сервиса (зафиксировано в ${detectedAt})`,
     enabled: "✅ Уведомления через Telegram включены",
     unsubscribed: "❌ Уведомления через Telegram отключены",
+    stopped: "🗑 Данные удалены. Уведомления и аккаунт отключены. Чтобы подключиться снова, нажмите «Подключить Telegram» в плагине.",
+    stopNoData: "ℹ️ Нет активной подписки — удалять нечего.",
+    stopFailed: "⚠️ Не удалось удалить данные. Попробуйте ещё раз позже.",
     test: "⚪ Это тестовое сообщение от Air Raid Alert.",
     statusNoRegion: "⚪ Регион ещё не выбран.\nОткрой настройки плагина Air Raid Alert и выбери область.",
     statusHeader: region => `📍 <b>${region}</b>`,
@@ -1347,6 +1353,9 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>All clear</b>\n${region}${start ? ` • started ${start}` : ""}\nExact end time unknown due to a service interruption (detected at ${detectedAt})`,
     enabled: "✅ Telegram notifications enabled",
     unsubscribed: "❌ Telegram notifications disabled",
+    stopped: "🗑 Your data has been deleted. Notifications and account are disabled. To reconnect, tap “Connect Telegram” in the plugin.",
+    stopNoData: "ℹ️ No active subscription — nothing to delete.",
+    stopFailed: "⚠️ Could not delete your data. Please try again later.",
     test: "⚪ This is a test message from Air Raid Alert.",
     statusNoRegion: "⚪ No region selected yet.\nOpen the Air Raid Alert plugin settings and choose an oblast.",
     statusHeader: region => `📍 <b>${region}</b>`,
@@ -1562,6 +1571,14 @@ async function deleteDeviceLink(env, deviceId) {
   }
 }
 
+async function deleteDeviceLinksForChat(env, chatId) {
+  try {
+    await env.DB.prepare("DELETE FROM device_links WHERE chat_id = ?1").bind(String(chatId)).run();
+  } catch (e) {
+    console.error(`[device] delete for chat ${chatId} error:`, e);
+  }
+}
+
 async function randomToken() {
   const bytes = new Uint8Array(SYNC_TOKEN_BYTES);
   crypto.getRandomValues(bytes);
@@ -1707,7 +1724,7 @@ async function handleTelegramWebhookInner(request, env, ctx = null) {
 
   const chatId = message.chat.id;
   const parts = message.text.trim().split(/\s+/);
-  const command = parts[0];
+  const command = String(parts[0] || "").toLowerCase().split("@")[0];
   const payload = parts[1];
 
   if (command === "/start" && payload) {
@@ -1751,6 +1768,22 @@ async function handleTelegramWebhookInner(request, env, ctx = null) {
         await sendTelegramTracked(env, chatId, stateMessage(user.region_name || user.oblast_key, status, lang));
       } catch (e) {
         console.error("[status] on-demand status failed:", e);
+      }
+    }
+  } else if (command === "/stop") {
+    const user = await readUser(env, `user:${chatId}`);
+    const lang = normLang((user && user.lang) || (message.from && message.from.language_code));
+    const m = M(lang);
+    if (!user) {
+      await sendTelegramTracked(env, chatId, m.stopNoData);
+    } else {
+      try {
+        await deleteUser(env, chatId);
+        await deleteDeviceLinksForChat(env, chatId);
+        await sendTelegramTracked(env, chatId, m.stopped);
+      } catch (e) {
+        console.error("[stop] delete failed:", e);
+        await sendTelegramTracked(env, chatId, m.stopFailed);
       }
     }
   }
