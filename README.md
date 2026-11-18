@@ -9,10 +9,10 @@ Cloudflare Worker that polls [alerts.in.ua](https://alerts.in.ua), keeps a snaps
 ## English
 
 ### What it does
-- Polls the alerts API every few seconds (Durable Object alarm loop) and stores a snapshot in D1. The minute cron only restarts that loop, so a new alert reaches Telegram in ~15 seconds instead of up to a minute.
+- Polls the alerts API every few seconds (Durable Object alarm loop) and stores a snapshot in D1. With the `TICKER` binding, a new alert reaches Telegram in ~15 seconds; without it the cron runs a full check, so latency is up to a minute. The same cron finishes pending maintenance broadcasts and deletes expired `device_links` / old `notified_events` rows.
 - Notifies Telegram users when their oblast or district changes state (red / yellow / clear).
 - Lets plugins register a location, toggle notifications, and read the current status through a public `/api` endpoint.
-- Serves a password-protected owner dashboard at `/admin`. Maintenance mode in the dashboard pauses alert delivery and messages every subscribed user, in their language, when it starts and ends.
+- Serves a password-protected owner dashboard at `/admin`. Maintenance mode pauses alert delivery and messages every registered chat in its language, including chats that turned notifications off.
 
 ### Requirements
 - A Cloudflare account (free plan is enough).
@@ -28,6 +28,7 @@ No local tools are needed. Everything is configured in the Cloudflare dashboard,
 3. **Create the Worker.** Workers & Pages → *Create* → *Worker* → give it a name → *Edit code*, replace the default code with the contents of `worker.js`, then *Deploy*.
 4. **Add bindings.** Open the Worker → *Settings* → *Bindings* → *Add*:
    - D1 database: variable name `DB`, database `air-raid-cache`.
+   - The `TICKER` Durable Object binding (class `AlertTicker`). It is optional: the `wrangler`/Workers Builds path creates it automatically from the `wrangler.toml` migration, and without it the Worker falls back to a once-a-minute cron check instead of the ~15-second loop.
 5. **Add secrets.** Worker → *Settings* → *Variables and Secrets* → add as **Secret** type:
    - `BOT_TOKEN` — your Telegram bot token.
    - `ALERTS_API_KEY` — your alerts.in.ua key.
@@ -53,28 +54,29 @@ Check, in order:
 | `DB` | D1 | Everything the Worker stores: user records, device-link tokens, alert snapshot cache, cron status |
 | `TICKER` | Durable Object | Near-real-time poller: an alarm re-runs every `TICK_MS` (15 s by default) and pushes changes to Telegram |
 
-The `TICKER` alarm is started automatically by the cron trigger (every minute it only makes sure the loop is alive). No extra setup is needed. If the binding is missing, the Worker falls back to a plain once-a-minute cron check.
+The `TICKER` alarm is started automatically by the cron trigger, which keeps the loop alive and also finishes maintenance broadcasts and cleanup. No extra setup is needed. If the binding is missing, the Worker falls back to a plain once-a-minute cron check.
 
 **Upstream limits.** alerts.in.ua documents a soft limit of 8–10 requests/minute per IP and a hard limit of 12/minute (systematic violations can block the IP and the token). The default is 4 requests/minute (15 s), and the ticker has its own sliding-window cap of 6/minute. Note that the limit is **per source IP**, and Cloudflare Workers share egress IPs with other Cloudflare services, so an occasional 429 is possible even at a low rate; on 429 the ticker backs off for 2 minutes (or `Retry-After`). To trade latency for headroom, set the `TICK_MS` variable in the dashboard (5000–60000 ms) — no redeploy needed. 15 s ≈ 5.8k requests/day; 20 s ≈ 4.3k; 30 s ≈ 2.9k.
 
 All persistent storage lives in this single D1 database. There is no KV namespace — an earlier version used KV for user records, but the project has fully migrated to D1.
 
 ### What's stored and where
-The `users` table in D1 is the only place per-user ("account") data lives. For each Telegram chat that registers, it holds:
+The `users` table in D1 is the main place per-user ("account") data lives. For each Telegram chat that registers, it holds:
 - the Telegram `chat_id`;
 - the selected oblast/district keys and the resolved region name;
 - language, notification on/off, and whether the chat is Telegram-connected;
-- a `sync_token` used to authenticate requests from the plugin;
+- one or more `sync_token`s: the legacy `sync_token` column plus a `sessions` list (up to 20 entries with `token`, `device_id`, `created_at`) used to authenticate plugin installs;
 - timestamps: `registered_at`, `last_activity`, `last_check`;
-- the user's last known alert state for their region (`last_alert_state`, `last_alert_active`, `last_alert_start`, `last_alert_end`);
-- a `raw` column that duplicates all of the above as a single JSON blob (kept for forward-compatible fields; it is not additional data beyond what's listed).
+- the last known alert state for the region (`last_alert_state`, `last_alert_active`, `last_alert_start`, `last_alert_end`) and per-location states in `location_states` (state plus start/end timestamps);
+- delivery diagnostics: `last_delivery_error`, `last_delivery_error_at`, `last_delivery_status`, and after a permanent failure `disabled_reason` + `disabled_at` (with `notify` switched off);
+- a `raw` column that stores the full user object as JSON, including `locations`, `location_states`, `sessions` and the delivery fields above; it is the source of truth for anything without a dedicated column.
 
-No message text, phone numbers, Telegram usernames, or precise GPS location are collected — only the chosen oblast/district and a Telegram chat ID.
+No message text, phone numbers, Telegram usernames, or precise GPS location are collected. The stored identifiers are the chosen oblast/district, the Telegram `chat_id`, and random plugin-generated tokens/device IDs.
 
 Other D1 tables:
-- `device_links` — a short-lived (minutes), self-expiring mapping used only to link a plugin install to a Telegram chat during the `/start` flow; rows are deleted once used or after they expire.
-- `cache_kv` — not user data: the shared snapshot of the current alert status, cron health, and a maintenance flag, fetched from alerts.in.ua.
-- `notified_events` — dedupe keys (not personal data) used to avoid sending the same notification twice.
+- `device_links` — a short-lived (minutes), self-expiring mapping used only to link a plugin install to a Telegram chat during the `/start` flow; it holds `device_id`, `chat_id`, `sync_token`, `lang` and timestamps, and rows are deleted once used or after they expire.
+- `cache_kv` — not user data: the shared snapshot of the current alert status, cron health, the maintenance flag, the auto-generated Telegram webhook secret, and the maintenance-broadcast job state. The alert data comes from alerts.in.ua.
+- `notified_events` — dedupe keys of the form `notified:<chat_id>:<location>:<state>:<since>` (so they embed the chat ID), kept for 30 days and then deleted by the cron; used to avoid sending the same notification twice.
 
 The `/admin` dashboard (password-protected with `ADMIN_TOKEN`) can export the full `users` table as a SQL dump for backup/migration purposes; treat `ADMIN_TOKEN` accordingly.
 
@@ -92,10 +94,15 @@ The Worker does not send user data to any third party other than Telegram (to de
 | POST | `/register` | Register or update a user's location and notification settings |
 | POST | `/unregister` | Remove a user |
 | GET | `/telegram/get-chat-id/{device_id}` | Poll the result of the `/start` device-link step |
-| POST | `/telegram/webhook` | Telegram updates (`message`, `callback_query`) |
+| POST | `/telegram/webhook` | Telegram updates (`message`, `edited_message`, channel posts) |
 | POST | `/telegram/test` | Send a test message to a user |
-| GET | `/webhook-info` | Telegram webhook status |
-| GET | `/admin` | Owner dashboard (requires `ADMIN_TOKEN`) |
+| GET | `/webhook-info` | Telegram webhook status (admin) |
+| GET | `/setup-webhook` | Re-register the Telegram webhook (admin) |
+| GET | `/admin` | Login page; dashboard data and actions require `ADMIN_TOKEN` |
+| POST | `/admin/login`, `/admin/logout` | Dashboard session start/end |
+| GET | `/admin/data` | Dashboard data (`users=1`, `full=1`, …; admin) |
+| POST | `/admin/action` | Dashboard actions: `init-schema`, `setup-webhook`, `purge-edge`, `maintenance-*`, `resync-notify` (admin) |
+| GET | `/admin/export/users.sql` | SQL dump of the `users` table (admin) |
 
 ### Security notes
 - The dashboard uses a password login with a signed session cookie (HMAC-SHA256, 7 days). Scripts can use `Authorization: Bearer <ADMIN_TOKEN>`.
@@ -106,10 +113,10 @@ The Worker does not send user data to any third party other than Telegram (to de
 ## Русский
 
 ### Что делает
-- Опрашивает API alerts.in.ua каждые несколько секунд (цикл alarm в Durable Object) и сохраняет снимок активных тревог в D1. Cron раз в минуту только перезапускает этот цикл, поэтому новая тревога приходит в Telegram за ~15 секунд, а не до минуты.
+- Опрашивает API alerts.in.ua каждые несколько секунд (цикл alarm в Durable Object) и сохраняет снимок активных тревог в D1. С биндингом `TICKER` новая тревога приходит в Telegram за ~15 секунд; без него cron выполняет полную проверку, и задержка достигает минуты. Тот же cron добивает начатую рассылку техработ и удаляет просроченные `device_links` и старые `notified_events`.
 - Отправляет пользователям в Telegram уведомления, когда статус их области или района меняется (красный / жёлтый / отбой).
 - Позволяет плагинам регистрировать локацию, включать и выключать уведомления и получать текущий статус через публичный `/api`.
-- Предоставляет панель владельца на `/admin` с паролем. Режим тех. работ в панели приостанавливает рассылку и отправляет всем подписанным пользователям сообщение на их языке о начале и завершении работ.
+- Предоставляет панель владельца на `/admin` с паролем. Режим тех. работ в панели приостанавливает рассылку и отправляет сообщение на его языке каждому зарегистрированному чату, включая чаты с выключенными уведомлениями.
 
 ### Требования
 - Аккаунт Cloudflare (бесплатного тарифа достаточно).
@@ -125,6 +132,7 @@ The Worker does not send user data to any third party other than Telegram (to de
 3. **Создайте Worker.** Workers & Pages → *Create* → *Worker* → укажите имя → *Edit code*, замените код по умолчанию содержимым `worker.js`, затем *Deploy*.
 4. **Добавьте биндинги.** Откройте Worker → *Settings* → *Bindings* → *Add*:
    - D1 database: имя переменной `DB`, база `air-raid-cache`.
+   - Биндинг Durable Object `TICKER` (класс `AlertTicker`). Он необязателен: при деплое через `wrangler`/Workers Builds создаётся автоматически из миграции в `wrangler.toml`, а без него Worker откатывается к проверке раз в минуту вместо цикла ~15 секунд.
 5. **Добавьте секреты.** Worker → *Settings* → *Variables and Secrets* → добавьте с типом **Secret**:
    - `BOT_TOKEN` — токен вашего Telegram-бота.
    - `ALERTS_API_KEY` — ключ alerts.in.ua.
@@ -150,28 +158,29 @@ The Worker does not send user data to any third party other than Telegram (to de
 | `DB` | D1 | Всё, что хранит Worker: записи пользователей, токены привязки устройств, кэш снимка тревог, статус cron |
 | `TICKER` | Durable Object | Поллер почти в реальном времени: alarm повторяется каждые `TICK_MS` (по умолчанию 15 с) и отправляет изменения в Telegram |
 
-Цикл `TICKER` запускается автоматически cron-триггером (раз в минуту он лишь проверяет, что цикл жив). Дополнительная настройка не нужна. Если биндинга нет, Worker откатывается к обычной проверке раз в минуту.
+Цикл `TICKER` запускается автоматически cron-триггером: тот поддерживает цикл живым, а также добивает рассылку техработ и выполняет очистку. Дополнительная настройка не нужна. Если биндинга нет, Worker откатывается к обычной проверке раз в минуту.
 
 **Лимиты alerts.in.ua.** Документированы мягкий лимит 8–10 запросов/минуту с одного IP и жёсткий — 12/минуту (при систематическом нарушении блокируются IP и токен). По умолчанию — 4 запроса/минуту (15 с), плюс собственный лимит тикера 6/минуту. Лимит считается **по IP источника**, а Cloudflare Workers делят выходные IP с другими сервисами Cloudflare, поэтому редкий 429 возможен даже на низкой частоте; при 429 тикер отступает на 2 минуты (или по `Retry-After`). Чтобы выменять скорость на запас, задайте переменную `TICK_MS` в дашборде (5000–60000 мс) — без передеплоя. 15 с ≈ 5,8 тыс. запросов/сутки; 20 с ≈ 4,3 тыс.; 30 с ≈ 2,9 тыс.
 
-Всё постоянное хранилище — это одна база D1. Отдельного KV namespace нет: раньше записи пользователей хранились в KV, но проект полностью перешёл на D1 (см. `MIGRATION.md`).
+Всё постоянное хранилище — это одна база D1. Отдельного KV namespace нет: раньше записи пользователей хранились в KV, но проект полностью перешёл на D1.
 
 ### Что и где хранится
-Таблица `users` в D1 — единственное место, где хранятся данные конкретного пользователя (аккаунта). Для каждого зарегистрированного Telegram-чата там хранится:
+Таблица `users` в D1 — основное место, где хранятся данные конкретного пользователя (аккаунта). Для каждого зарегистрированного Telegram-чата там хранится:
 - `chat_id` в Telegram;
 - выбранные ключи области/района и итоговое название региона;
 - язык, включены ли уведомления, и подключён ли чат к Telegram;
-- `sync_token` — токен для аутентификации запросов от плагина;
+- один или несколько `sync_token`: устаревшая колонка `sync_token` плюс список `sessions` (до 20 элементов с `token`, `device_id`, `created_at`) для аутентификации установок плагина;
 - временные метки: `registered_at`, `last_activity`, `last_check`;
-- последний известный статус тревоги для региона пользователя (`last_alert_state`, `last_alert_active`, `last_alert_start`, `last_alert_end`);
-- колонка `raw` — дублирует все перечисленные поля одним JSON-объектом (для совместимости со старым форматом; это не дополнительные данные сверх перечисленного).
+- последний известный статус тревоги (`last_alert_state`, `last_alert_active`, `last_alert_start`, `last_alert_end`) и состояния по локациям в `location_states` (статус и метки начала/окончания);
+- диагностика доставки: `last_delivery_error`, `last_delivery_error_at`, `last_delivery_status`, а после постоянной ошибки — `disabled_reason` + `disabled_at` (уведомления при этом выключаются);
+- колонка `raw` — полный объект пользователя в JSON, включая `locations`, `location_states`, `sessions` и перечисленные поля доставки; для всего, что не вынесено в отдельную колонку, это источник истины.
 
-Текст сообщений, номера телефонов, юзернеймы Telegram или точная GPS-локация не собираются — только выбранная область/район и chat_id в Telegram.
+Текст сообщений, номера телефонов, юзернеймы Telegram или точная GPS-локация не собираются. Хранимые идентификаторы — выбранная область/район, `chat_id` в Telegram и случайные токены/device_id, сгенерированные плагином.
 
 Остальные таблицы D1:
-- `device_links` — короткоживущая (минуты), самоудаляющаяся связка для привязки установки плагина к Telegram-чату во время сценария `/start`; строки удаляются после использования или по истечении срока.
-- `cache_kv` — не пользовательские данные: общий снимок текущего статуса тревог, состояние cron и флаг техработ, полученные из alerts.in.ua.
-- `notified_events` — ключи дедупликации (не персональные данные), чтобы не отправлять одно и то же уведомление дважды.
+- `device_links` — короткоживущая (минуты), самоудаляющаяся связка для привязки установки плагина к Telegram-чату во время сценария `/start`; хранит `device_id`, `chat_id`, `sync_token`, `lang` и метки времени, строки удаляются после использования или по истечении срока.
+- `cache_kv` — не пользовательские данные: общий снимок текущего статуса тревог, состояние cron, флаг техработ, автосгенерированный секрет вебхука Telegram и состояние рассылки техработ. Данные о тревогах приходят из alerts.in.ua.
+- `notified_events` — ключи дедупликации вида `notified:<chat_id>:<локация>:<статус>:<since>` (то есть содержат chat_id), хранятся 30 дней, затем удаляются cron; нужны, чтобы не отправлять одно и то же уведомление дважды.
 
 Панель `/admin` (защищена паролем `ADMIN_TOKEN`) умеет экспортировать всю таблицу `users` в виде SQL-дампа для бэкапа/переноса — относитесь к `ADMIN_TOKEN` соответственно.
 
@@ -188,10 +197,15 @@ Worker не передаёт пользовательские данные ни�
 | GET | `/api` | Текущий статус тревог (кэшируется на edge) |
 | POST | `/register` | Регистрация или обновление локации и настроек уведомлений |
 | POST | `/unregister` | Удаление пользователя |
-| POST | `/telegram/webhook` | Обновления Telegram (`message`, `callback_query`) |
+| POST | `/telegram/webhook` | Обновления Telegram (`message`, `edited_message`, посты в каналах) |
 | POST | `/telegram/test` | Отправка тестового сообщения пользователю |
-| GET | `/webhook-info` | Статус вебхука Telegram |
-| GET | `/admin` | Панель владельца (нужен `ADMIN_TOKEN`) |
+| GET | `/webhook-info` | Статус вебхука Telegram (админ) |
+| GET | `/setup-webhook` | Повторная регистрация вебхука Telegram (админ) |
+| GET | `/admin` | Страница входа; данные и действия панели требуют `ADMIN_TOKEN` |
+| POST | `/admin/login`, `/admin/logout` | Начало/завершение сессии панели |
+| GET | `/admin/data` | Данные панели (`users=1`, `full=1`, …; админ) |
+| POST | `/admin/action` | Действия панели: `init-schema`, `setup-webhook`, `purge-edge`, `maintenance-*`, `resync-notify` (админ) |
+| GET | `/admin/export/users.sql` | SQL-дамп таблицы `users` (админ) |
 
 ### Безопасность
 - Панель использует вход по паролю и подписанную cookie-сессию (HMAC-SHA256, 7 дней). Скрипты могут использовать `Authorization: Bearer <ADMIN_TOKEN>`.
@@ -202,10 +216,10 @@ Worker не передаёт пользовательские данные ни�
 ## Українська
 
 ### Що робить
-- Опитує API alerts.in.ua кожні кілька секунд (цикл alarm у Durable Object) і зберігає снімок активних тривог у D1. Cron раз на хвилину лише перезапускає цей цикл, тому нова тривога надходить у Telegram за ~15 секунд, а не до хвилини.
+- Опитує API alerts.in.ua кожні кілька секунд (цикл alarm у Durable Object) і зберігає снімок активних тривог у D1. З біндингом `TICKER` нова тривога надходить у Telegram за ~15 секунд; без нього cron виконує повну перевірку, і затримка сягає хвилини. Той самий cron довиконує розсилку техробіт і видаляє прострочені `device_links` та старі `notified_events`.
 - Надсилає користувачам у Telegram сповіщення, коли змінюється статус їхньої області або району (червоний / жовтий / відбій).
 - Дозволяє плагінам реєструвати локацію, вмикати й вимикати сповіщення та отримувати поточний статус через публічний `/api`.
-- Надає панель власника на `/admin` із паролем. Режим тех. робіт у панелі призупиняє розсилку й надсилає всім підписаним користувачам повідомлення їхньою мовою про початок і завершення робіт.
+- Надає панель власника на `/admin` із паролем. Режим тех. робіт у панелі призупиняє розсилку й надсилає повідомлення мовою чату кожному зареєстрованому чату, включно з чатами з вимкненими сповіщеннями.
 
 ### Вимоги
 - Акаунт Cloudflare (достатньо безкоштовного тарифу).
@@ -221,6 +235,7 @@ Worker не передаёт пользовательские данные ни�
 3. **Створіть Worker.** Workers & Pages → *Create* → *Worker* → вкажіть назву → *Edit code*, замініть код за замовчуванням вмістом `worker.js`, потім *Deploy*.
 4. **Додайте біндинги.** Відкрийте Worker → *Settings* → *Bindings* → *Add*:
    - D1 database: назва змінної `DB`, база `air-raid-cache`.
+   - Біндинг Durable Object `TICKER` (клас `AlertTicker`). Він необов'язковий: під час деплою через `wrangler`/Workers Builds створюється автоматично з міграції в `wrangler.toml`, а без нього Worker відкочується до перевірки раз на хвилину замість циклу ~15 секунд.
 5. **Додайте секрети.** Worker → *Settings* → *Variables and Secrets* → додайте з типом **Secret**:
    - `BOT_TOKEN` — токен вашого Telegram-бота.
    - `ALERTS_API_KEY` — ключ alerts.in.ua.
@@ -246,28 +261,29 @@ Worker не передаёт пользовательские данные ни�
 | `DB` | D1 | Усе, що зберігає Worker: записи користувачів, токени прив'язки пристроїв, кеш снімка тривог, статус cron |
 | `TICKER` | Durable Object | Поллер майже в реальному часі: alarm повторюється кожні `TICK_MS` (типово 15 с) і надсилає зміни в Telegram |
 
-Цикл `TICKER` запускається автоматично cron-тригером (раз на хвилину він лише перевіряє, що цикл живий). Додаткове налаштування не потрібне. Якщо біндингу немає, Worker відкочується до звичайної перевірки раз на хвилину.
+Цикл `TICKER` запускається автоматично cron-тригером: той підтримує цикл живим, а також довиконує розсилку техробіт і виконує очищення. Додаткове налаштування не потрібне. Якщо біндингу немає, Worker відкочується до звичайної перевірки раз на хвилину.
 
 **Ліміти alerts.in.ua.** Документовано м'який ліміт 8–10 запитів/хвилину з однієї IP та жорсткий — 12/хвилину (за систематичне порушення блокуються IP і токен). Типово — 4 запити/хвилину (15 с), плюс власний ліміт тікера 6/хвилину. Ліміт рахується **за IP джерела**, а Cloudflare Workers поділяють вихідні IP з іншими сервісами Cloudflare, тому рідкісний 429 можливий навіть на низькій частоті; на 429 тікер відступає на 2 хвилини (або за `Retry-After`). Щоб обміняти швидкість на запас, задайте змінну `TICK_MS` у дашборді (5000–60000 мс) — без передеплою. 15 с ≈ 5,8 тис. запитів/добу; 20 с ≈ 4,3 тис.; 30 с ≈ 2,9 тис.
 
-Усе постійне сховище — це одна база D1. Окремого KV namespace немає: раніше записи користувачів зберігалися в KV, але проєкт повністю перейшов на D1 (див. `MIGRATION.md`).
+Усе постійне сховище — це одна база D1. Окремого KV namespace немає: раніше записи користувачів зберігалися в KV, але проєкт повністю перейшов на D1.
 
 ### Що і де зберігається
-Таблиця `users` у D1 — єдине місце, де зберігаються дані конкретного користувача (акаунта). Для кожного зареєстрованого Telegram-чату там зберігається:
+Таблиця `users` у D1 — основне місце, де зберігаються дані конкретного користувача (акаунта). Для кожного зареєстрованого Telegram-чату там зберігається:
 - `chat_id` у Telegram;
 - обрані ключі області/району та підсумкова назва регіону;
 - мова, чи увімкнені сповіщення, і чи підключений чат до Telegram;
-- `sync_token` — токен для автентифікації запитів від плагіна;
+- один або кілька `sync_token`: застаріла колонка `sync_token` плюс список `sessions` (до 20 елементів із `token`, `device_id`, `created_at`) для автентифікації встановлень плагіна;
 - часові мітки: `registered_at`, `last_activity`, `last_check`;
-- останній відомий статус тривоги для регіону користувача (`last_alert_state`, `last_alert_active`, `last_alert_start`, `last_alert_end`);
-- колонка `raw` — дублює всі перелічені поля одним JSON-об'єктом (для сумісності зі старим форматом; це не додаткові дані понад перелічене).
+- останній відомий статус тривоги (`last_alert_state`, `last_alert_active`, `last_alert_start`, `last_alert_end`) і стани за локаціями в `location_states` (статус і мітки початку/завершення);
+- діагностика доставки: `last_delivery_error`, `last_delivery_error_at`, `last_delivery_status`, а після постійної помилки — `disabled_reason` + `disabled_at` (сповіщення при цьому вимикаються);
+- колонка `raw` — повний об'єкт користувача в JSON, включно з `locations`, `location_states`, `sessions` і переліченими полями доставки; для всього, що не винесено в окрему колонку, це джерело істини.
 
-Текст повідомлень, номери телефонів, юзернейми Telegram або точна GPS-локація не збираються — лише обрана область/район і chat_id у Telegram.
+Текст повідомлень, номери телефонів, юзернейми Telegram або точна GPS-локація не збираються. Збережені ідентифікатори — обрана область/район, `chat_id` у Telegram і випадкові токени/device_id, згенеровані плагіном.
 
 Інші таблиці D1:
-- `device_links` — короткоживуча (хвилини), самовидаляюча зв'язка для прив'язки встановлення плагіна до Telegram-чату під час сценарію `/start`; рядки видаляються після використання або після завершення терміну.
-- `cache_kv` — не користувацькі дані: загальний знімок поточного статусу тривог, стан cron і прапорець техробіт, отримані з alerts.in.ua.
-- `notified_events` — ключі дедуплікації (не персональні дані), щоб не надсилати одне й те саме сповіщення двічі.
+- `device_links` — короткоживуча (хвилини), самовидаляюча зв'язка для прив'язки встановлення плагіна до Telegram-чату під час сценарію `/start`; зберігає `device_id`, `chat_id`, `sync_token`, `lang` і часові мітки, рядки видаляються після використання або після завершення терміну.
+- `cache_kv` — не користувацькі дані: загальний знімок поточного статусу тривог, стан cron, прапорець техробіт, автозгенерований секрет вебхука Telegram і стан розсилки техробіт. Дані про тривоги надходять з alerts.in.ua.
+- `notified_events` — ключі дедуплікації вигляду `notified:<chat_id>:<локація>:<статус>:<since>` (тобто містять chat_id), зберігаються 30 днів, потім видаляються cron; потрібні, щоб не надсилати те саме сповіщення двічі.
 
 Панель `/admin` (захищена паролем `ADMIN_TOKEN`) вміє експортувати всю таблицю `users` у вигляді SQL-дампа для бекапу/перенесення — ставтеся до `ADMIN_TOKEN` відповідно.
 
@@ -280,13 +296,19 @@ Worker не передає користувацькі дані нікому, к�
 |---|---|---|
 | GET | `/` | Назва сервісу |
 | GET | `/health` | Версія воркера, схема БД, режим тікера і `tickMs` |
+| GET/POST | `/tick?key=<ADMIN_TOKEN>` | Примусова негайна перевірка (як один тік alarm). Потрібен `ADMIN_TOKEN` або `TICK_SECRET` |
 | GET | `/api` | Поточний статус тривог (кешується на edge) |
 | POST | `/register` | Реєстрація або оновлення локації та налаштувань сповіщень |
 | POST | `/unregister` | Видалення користувача |
-| POST | `/telegram/webhook` | Оновлення Telegram (`message`, `callback_query`) |
+| POST | `/telegram/webhook` | Оновлення Telegram (`message`, `edited_message`, пости в каналах) |
 | POST | `/telegram/test` | Надсилання тестового повідомлення користувачу |
-| GET | `/webhook-info` | Статус вебхука Telegram |
-| GET | `/admin` | Панель власника (потрібен `ADMIN_TOKEN`) |
+| GET | `/webhook-info` | Статус вебхука Telegram (адмін) |
+| GET | `/setup-webhook` | Повторна реєстрація вебхука Telegram (адмін) |
+| GET | `/admin` | Сторінка входу; дані й дії панелі потребують `ADMIN_TOKEN` |
+| POST | `/admin/login`, `/admin/logout` | Початок/завершення сесії панелі |
+| GET | `/admin/data` | Дані панелі (`users=1`, `full=1`, …; адмін) |
+| POST | `/admin/action` | Дії панелі: `init-schema`, `setup-webhook`, `purge-edge`, `maintenance-*`, `resync-notify` (адмін) |
+| GET | `/admin/export/users.sql` | SQL-дамп таблиці `users` (адмін) |
 
 ### Безпека
 - Панель використовує вхід за паролем і підписану cookie-сесію (HMAC-SHA256, 7 днів). Скрипти можуть використовувати `Authorization: Bearer <ADMIN_TOKEN>`.

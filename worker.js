@@ -4,7 +4,7 @@ const ALERTS_API = "https://api.alerts.in.ua/v1/alerts/active.json";
 const TELEGRAM_API = "https://api.telegram.org/bot";
 const FETCH_TIMEOUT_MS = 5000;
 const EDGE_CACHE_TTL_SECONDS = 5;
-const WORKER_VERSION = "air-raid-panel-2026-11-12.23";
+const WORKER_VERSION = "air-raid-panel-2026-11-18.24";
 const SEND_CONCURRENCY = 15;
 const MIN_CACHE_WRITE_INTERVAL_SECONDS = 60;
 const RETRY_WINDOW_MS = 5 * 60 * 1000;
@@ -1303,6 +1303,9 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>Тривоги більше немає</b>\n${region}${start ? ` • почалась ${start}` : ""}\nТочний час відбою невідомий через перерву в роботі сервісу (зафіксовано о ${detectedAt})`,
     enabled: "✅ Сповіщення через Telegram увімкнено",
     unsubscribed: "❌ Сповіщення через Telegram вимкнено",
+    unregistered: "🗑 Дані видалено. Сповіщення та акаунт вимкнено. Щоб підключитися знову, натисніть «Підключити Telegram» у плагіні.",
+    unregisterNoData: "ℹ️ Немає активної підписки — видаляти нічого.",
+    unregisterFailed: "⚠️ Не вдалося видалити дані. Спробуйте ще раз пізніше.",
     test: "⚪ Це тестове повідомлення від Air Raid Alert.",
     statusNoRegion: "⚪ Регіон ще не обрано.\nВідкрий налаштування плагіна Air Raid Alert і обери область.",
     statusHeader: region => `📍 <b>${region}</b>`,
@@ -1325,6 +1328,9 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>Тревоги больше нет</b>\n${region}${start ? ` • началась ${start}` : ""}\nТочное время отбоя неизвестно из-за перерыва в работе сервиса (зафиксировано в ${detectedAt})`,
     enabled: "✅ Уведомления через Telegram включены",
     unsubscribed: "❌ Уведомления через Telegram отключены",
+    unregistered: "🗑 Данные удалены. Уведомления и аккаунт отключены. Чтобы подключиться снова, нажмите «Подключить Telegram» в плагине.",
+    unregisterNoData: "ℹ️ Нет активной подписки — удалять нечего.",
+    unregisterFailed: "⚠️ Не удалось удалить данные. Попробуйте ещё раз позже.",
     test: "⚪ Это тестовое сообщение от Air Raid Alert.",
     statusNoRegion: "⚪ Регион ещё не выбран.\nОткрой настройки плагина Air Raid Alert и выбери область.",
     statusHeader: region => `📍 <b>${region}</b>`,
@@ -1347,6 +1353,9 @@ const TEXTS = {
     clearApprox: (region, start, detectedAt) => `🟢 <b>All clear</b>\n${region}${start ? ` • started ${start}` : ""}\nExact end time unknown due to a service interruption (detected at ${detectedAt})`,
     enabled: "✅ Telegram notifications enabled",
     unsubscribed: "❌ Telegram notifications disabled",
+    unregistered: "🗑 Your data has been deleted. Notifications and account are disabled. To reconnect, tap “Connect Telegram” in the plugin.",
+    unregisterNoData: "ℹ️ No active subscription — nothing to delete.",
+    unregisterFailed: "⚠️ Could not delete your data. Please try again later.",
     test: "⚪ This is a test message from Air Raid Alert.",
     statusNoRegion: "⚪ No region selected yet.\nOpen the Air Raid Alert plugin settings and choose an oblast.",
     statusHeader: region => `📍 <b>${region}</b>`,
@@ -1422,12 +1431,27 @@ function keyToChatId(key) {
   return key && String(key).startsWith("user:") ? String(key).slice(5) : null;
 }
 
+const LEGACY_PERSONAL_FIELDS = ["telegram_username", "telegram_first_name", "telegram_last_name"];
+
+function scrubLegacyPersonalFields(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  let changed = false;
+  for (const field of LEGACY_PERSONAL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(obj, field)) {
+      delete obj[field];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function rowToUser(row) {
   if (!row) return null;
   let extra = {};
   if (row.raw) {
     try { const parsed = JSON.parse(row.raw); if (parsed && typeof parsed === "object") extra = parsed; } catch (e) { }
   }
+  scrubLegacyPersonalFields(extra);
   return {
     ...extra,
     chat_id: row.chat_id,
@@ -1454,6 +1478,7 @@ function rowToUser(row) {
 function userToRow(chatId, user) {
   const rawUser = { ...user };
   delete rawUser.raw;
+  scrubLegacyPersonalFields(rawUser);
   return [
     String(chatId),
     user.sync_token || null,
@@ -1519,7 +1544,15 @@ async function deleteUser(env, chatId) {
 async function listUsersPage(env, offset, limit, strict = false) {
   try {
     const res = await env.DB.prepare(`SELECT ${USER_COLUMNS} FROM users ORDER BY chat_id LIMIT ?1 OFFSET ?2`).bind(limit, offset).all();
-    return (res && res.results) || [];
+    const rows = (res && res.results) || [];
+    for (const row of rows) {
+      if (!row || typeof row.raw !== "string" || !row.raw) continue;
+      try {
+        const parsed = JSON.parse(row.raw);
+        if (parsed && typeof parsed === "object" && scrubLegacyPersonalFields(parsed)) row.raw = JSON.stringify(parsed);
+      } catch (e) { }
+    }
+    return rows;
   } catch (e) {
     console.error("[user] list error:", e);
     if (strict) throw e;
@@ -1559,6 +1592,14 @@ async function deleteDeviceLink(env, deviceId) {
     await env.DB.prepare("DELETE FROM device_links WHERE device_id = ?1").bind(deviceId).run();
   } catch (e) {
     console.error(`[device] delete error for ${deviceId}:`, e);
+  }
+}
+
+async function deleteDeviceLinksForChat(env, chatId) {
+  try {
+    await env.DB.prepare("DELETE FROM device_links WHERE chat_id = ?1").bind(String(chatId)).run();
+  } catch (e) {
+    console.error(`[device] delete for chat ${chatId} error:`, e);
   }
 }
 
@@ -1637,7 +1678,7 @@ async function registerTelegramWebhook(env, webhookUrl, dropPending = false) {
   const secret = await getWebhookSecret(env);
   const setUrl = new URL(`${TELEGRAM_API}${env.BOT_TOKEN}/setWebhook`);
   setUrl.searchParams.set("url", webhookUrl);
-  setUrl.searchParams.set("allowed_updates", JSON.stringify(["message", "callback_query"]));
+  setUrl.searchParams.set("allowed_updates", JSON.stringify(["message", "edited_message", "channel_post", "edited_channel_post"]));
   if (dropPending) setUrl.searchParams.set("drop_pending_updates", "true");
   if (secret) setUrl.searchParams.set("secret_token", secret);
   const r = await fetchWithTimeout(setUrl.toString(), {}, FETCH_TIMEOUT_MS);
@@ -1695,9 +1736,6 @@ async function handleTelegramWebhookInner(request, env, ctx = null) {
       const user = await readUser(env, key);
       if (user) await writeUser(env, key, {
         ...user,
-        telegram_username: message.from.username ? String(message.from.username).slice(0, 64) : (user.telegram_username || null),
-        telegram_first_name: message.from.first_name ? String(message.from.first_name).slice(0, 64) : (user.telegram_first_name || null),
-        telegram_last_name: message.from.last_name ? String(message.from.last_name).slice(0, 64) : (user.telegram_last_name || null),
         last_activity: new Date().toISOString(),
         telegram_connected: true
       });
@@ -1707,7 +1745,7 @@ async function handleTelegramWebhookInner(request, env, ctx = null) {
 
   const chatId = message.chat.id;
   const parts = message.text.trim().split(/\s+/);
-  const command = parts[0];
+  const command = String(parts[0] || "").toLowerCase().split("@")[0];
   const payload = parts[1];
 
   if (command === "/start" && payload) {
@@ -1738,6 +1776,22 @@ async function handleTelegramWebhookInner(request, env, ctx = null) {
     const existing = await readUser(env, `user:${chatId}`);
     const lang = normLang((existing && existing.lang) || (message.from && message.from.language_code));
     await sendTelegramTracked(env, chatId, M(lang).genericStart);
+  } else if (command === "/unregister") {
+    const user = await readUser(env, `user:${chatId}`);
+    const lang = normLang((user && user.lang) || (message.from && message.from.language_code));
+    const m = M(lang);
+    if (!user) {
+      await sendTelegramTracked(env, chatId, m.unregisterNoData);
+    } else {
+      try {
+        await deleteUser(env, chatId);
+        await deleteDeviceLinksForChat(env, chatId);
+        await sendTelegramTracked(env, chatId, m.unregistered);
+      } catch (e) {
+        console.error("[unregister] delete failed:", e);
+        await sendTelegramTracked(env, chatId, m.unregisterFailed);
+      }
+    }
   } else if (command === "/status") {
     const user = await readUser(env, `user:${chatId}`);
     const lang = normLang((user && user.lang) || (message.from && message.from.language_code));
